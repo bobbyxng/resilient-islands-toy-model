@@ -125,7 +125,7 @@ if __name__ == "__main__":
 
     fig.update_layout(
         title="Optimal capacity",
-        xaxis_title="Component",
+        xaxis_title="Carrier",
         yaxis_title="Installed Capacity [MW]",
         barmode="group",      # side-by-side comparison
         hovermode="x unified",
@@ -153,6 +153,15 @@ if __name__ == "__main__":
     fig2.add_trace(go.Bar(x=energy_balances_pivot.carrier, y=energy_balances_pivot["grid"], name="Grid exists"))
     fig2.add_trace(go.Bar(x=energy_balances_pivot.carrier, y=energy_balances_pivot["maxpu0"], name="Grid removed (s_max_pu=0)"))
     fig2.add_trace(go.Bar(x=energy_balances_pivot.carrier, y=energy_balances_pivot["removed"], name="Grid removed (lines removed)"))
+
+    fig2.update_layout(
+        title="Energy balance",
+        xaxis_title="Carrier",
+        yaxis_title="Energy [MWh]",
+        barmode="group",      # side-by-side comparison
+        hovermode="x unified",
+        template="plotly_white",
+    )
 
     # Print capital costs and opex
     costs1 = pd.concat([n1.statistics.capex(), n1.statistics.opex()], axis=1, keys=["capex", "opex"])
@@ -192,3 +201,6 @@ if __name__ == "__main__":
     print("\nTotal annual costs by scenario:")
     print(total_costs.to_string(index=False))
     
+    # Marginal prices
+    mp_diff = n3.buses_t.marginal_price - n2.buses_t.marginal_price
+    mp_diff.abs().mean()
