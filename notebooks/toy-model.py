@@ -12,8 +12,7 @@ def extract_capacity(n: pypsa.Network) -> pd.DataFrame:
     """
     Extract a tidy table of optimal capacities for all extendable assets.
     """
-    df = n.statistics.optimal_capacity()
-    df = df.reset_index()  # component, name, capacity
+    df = n.statistics.optimal_capacity().reset_index()
     df.columns = ["component", "name", "capacity"]
     return df
 
@@ -24,8 +23,44 @@ def extract_energy_balance(n: pypsa.Network) -> pd.DataFrame:
     """
     df = n.statistics.energy_balance()
     df.rename("energy", inplace=True)
-    df = df.reset_index()  # carrier, name, energy_in, energy_out, etc.
-    return df
+    return df.reset_index()
+
+
+def calculate_total_costs(n: pypsa.Network, exclude_grid: bool = False) -> float:
+    """
+    Calculate total costs (capex + opex) for a network.
+    If exclude_grid=True, excludes AC lines and DC links.
+    """
+    costs = pd.concat([n.statistics.capex(), n.statistics.opex()], axis=1, keys=["capex", "opex"])
+    
+    if exclude_grid:
+        costs = costs[~(
+            ((costs.index.get_level_values("component") == "Line") &
+             (costs.index.get_level_values("carrier") == "AC")) |
+            ((costs.index.get_level_values("component") == "Link") &
+             (costs.index.get_level_values("carrier") == "DC"))
+        )]
+    
+    return costs.fillna(0).sum().sum()
+
+
+def create_bar_plot(pivot_df, x_col, y_cols, labels, title, yaxis_title):
+    """
+    Create a grouped bar plot with multiple scenarios.
+    """
+    fig = go.Figure()
+    for y_col, label in zip(y_cols, labels):
+        fig.add_trace(go.Bar(x=pivot_df[x_col], y=pivot_df[y_col], name=label))
+    
+    fig.update_layout(
+        title=title,
+        xaxis_title=x_col.title(),
+        yaxis_title=yaxis_title,
+        barmode="group",
+        hovermode="x unified",
+        template="plotly_white",
+    )
+    return fig
 
 
 # Main
@@ -69,16 +104,14 @@ if __name__ == "__main__":
     cap1 = extract_capacity(n1)
     eb1 = extract_energy_balance(n1)
 
-
     # S_max_pu = 0 run
     print("Running islanded optimisation (s_max_pu = 0 and p_max_pu = 0)...")
     n2 = n.copy()
     if not n.lines.empty:
         n2.lines["s_max_pu"] = 0
     if not n2.links.empty:
-        dc_links = n2.links.index[n2.links.carrier == "DC"]
-        n2.links.loc[dc_links, "p_max_pu"] = 0
-        n2.links.loc[dc_links, "p_min_pu"] = 0
+        dc_links = n2.links[n2.links.carrier == "DC"].index
+        n2.links.loc[dc_links, ["p_max_pu", "p_min_pu"]] = 0
 
     n2.optimize(solver_name=solver_name)
 
@@ -91,8 +124,7 @@ if __name__ == "__main__":
     if not n.lines.empty:
         n3.remove("Line", n3.lines.index)
     if not n3.links.empty:
-        dc_links = n3.links.index[n3.links.carrier == "DC"]
-        n3.remove("Link", dc_links)
+        n3.remove("Link", n3.links[n3.links.carrier == "DC"].index)
 
     n3.optimize(solver_name=solver_name)
 
@@ -102,12 +134,7 @@ if __name__ == "__main__":
     ### Merge and compare results
 
     # Capacities
-    capacities = []
-    capacities.append(cap1.assign(scenario="grid"))
-    capacities.append(cap2.assign(scenario="maxpu0"))
-    capacities.append(cap3.assign(scenario="removed"))
-
-    capacities = pd.concat(capacities, ignore_index=True)
+    capacities = pd.concat([cap1.assign(scenario="grid"), cap2.assign(scenario="maxpu0"), cap3.assign(scenario="removed")], ignore_index=True)
     capacities_pivot = capacities.pivot_table(
         index=["component", "name"],
         columns="scenario",
@@ -115,32 +142,17 @@ if __name__ == "__main__":
         fill_value=0,
     ).reset_index()
 
-
-    ### Plot capacities
-    fig = go.Figure()
-
-    fig.add_trace(go.Bar(x=capacities_pivot.name, y=capacities_pivot["grid"], name="Grid exists"))
-    fig.add_trace(go.Bar(x=capacities_pivot.name, y=capacities_pivot["maxpu0"], name="Grid removed (s_max_pu=0)"))
-    fig.add_trace(go.Bar(x=capacities_pivot.name, y=capacities_pivot["removed"], name="Grid removed (lines removed)"))
-
-    fig.update_layout(
-        title="Optimal capacity",
-        xaxis_title="Carrier",
-        yaxis_title="Installed Capacity [MW]",
-        barmode="group",      # side-by-side comparison
-        hovermode="x unified",
-        template="plotly_white",
+    # Plot capacities
+    fig = create_bar_plot(
+        capacities_pivot, "name",
+        ["grid", "maxpu0", "removed"],
+        ["Grid exists", "Grid removed (s_max_pu=0)", "Grid removed (lines removed)"],
+        "Optimal capacity", "Installed Capacity [MW]"
     )
-
     fig.show()
 
     # Energy balance
-    energy_balances = []
-    energy_balances.append(eb1.assign(scenario="grid"))
-    energy_balances.append(eb2.assign(scenario="maxpu0"))
-    energy_balances.append(eb3.assign(scenario="removed"))
-    
-    energy_balances = pd.concat(energy_balances, ignore_index=True)
+    energy_balances = pd.concat([eb1.assign(scenario="grid"), eb2.assign(scenario="maxpu0"), eb3.assign(scenario="removed")], ignore_index=True)
     energy_balances_pivot = energy_balances.pivot_table(
         index="carrier",
         columns="scenario",
@@ -148,54 +160,22 @@ if __name__ == "__main__":
         fill_value=0,
     ).reset_index()
 
-    ### Plot energy balances
-    fig2 = go.Figure()
-    fig2.add_trace(go.Bar(x=energy_balances_pivot.carrier, y=energy_balances_pivot["grid"], name="Grid exists"))
-    fig2.add_trace(go.Bar(x=energy_balances_pivot.carrier, y=energy_balances_pivot["maxpu0"], name="Grid removed (s_max_pu=0)"))
-    fig2.add_trace(go.Bar(x=energy_balances_pivot.carrier, y=energy_balances_pivot["removed"], name="Grid removed (lines removed)"))
-
-    fig2.update_layout(
-        title="Energy balance",
-        xaxis_title="Carrier",
-        yaxis_title="Energy [MWh]",
-        barmode="group",      # side-by-side comparison
-        hovermode="x unified",
-        template="plotly_white",
+    # Plot energy balances
+    fig2 = create_bar_plot(
+        energy_balances_pivot, "carrier",
+        ["grid", "maxpu0", "removed"],
+        ["Grid exists", "Grid removed (s_max_pu=0)", "Grid removed (lines removed)"],
+        "Energy balance", "Energy [MWh]"
     )
+    fig2.show()
 
     # Print capital costs and opex
-    costs1 = pd.concat([n1.statistics.capex(), n1.statistics.opex()], axis=1, keys=["capex", "opex"])
-    costs1 = costs1.fillna(0).sum().sum()
-    
-    costs2 = pd.concat([n2.statistics.capex(), n2.statistics.opex()], axis=1, keys=["capex", "opex"])
-    costs2 = costs2[~(
-        (
-            (costs2.index.get_level_values("component") == "Line") &
-            (costs2.index.get_level_values("carrier") == "AC")) |
-        (
-            (costs2.index.get_level_values("component") == "Link") &
-            (costs2.index.get_level_values("carrier") == "DC"))
-    )]
-    costs2 = costs2.fillna(0).sum().sum()
-
-    costs3 = pd.concat([n3.statistics.capex(), n3.statistics.opex()], axis=1, keys=["capex", "opex"])
-    costs3 = costs3[~(
-        (
-            (costs3.index.get_level_values("component") == "Line") &
-            (costs3.index.get_level_values("carrier") == "AC")) |
-        (
-            (costs3.index.get_level_values("component") == "Link") &
-            (costs3.index.get_level_values("carrier") == "DC"))
-    )]
-    costs3 = costs3.fillna(0).sum().sum()
-
-
     total_costs = pd.DataFrame({
         "scenario": ["grid", "maxpu0", "removed"],
         "total_cost": [
-            np.round(costs1/1e9, 3),
-            np.round(costs2/1e9, 3),
-            np.round(costs3/1e9, 3),
+            np.round(calculate_total_costs(n1) / 1e9, 3),
+            np.round(calculate_total_costs(n2, exclude_grid=True) / 1e9, 3),
+            np.round(calculate_total_costs(n3, exclude_grid=True) / 1e9, 3),
         ]
     })
     print("\nTotal annual costs by scenario:")
